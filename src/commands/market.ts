@@ -36,7 +36,7 @@ export function registerMarketCommands(program: Command): void {
     .description("Get token K-line (candlestick) data")
     .requiredOption("--chain <chain>", "Chain: sol / bsc / base / eth / arbitrum / hyperevm / robinhood / arc / stable")
     .requiredOption("--address <address>", "Token contract address")
-    .requiredOption("--resolution <resolution>", "Candlestick resolution: 30s / 1m / 5m / 15m / 1h / 4h / 1d")
+    .requiredOption("--resolution <resolution>", "Candlestick resolution: 1s (Pro only) / 30s / 1m / 5m / 15m / 1h / 4h / 1d")
     .option("--from <timestamp>", "Start time (Unix seconds)", parseInt)
     .option("--to <timestamp>", "End time (Unix seconds)", parseInt)
     .option("--raw", "Output raw JSON")
