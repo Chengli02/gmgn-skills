@@ -139,7 +139,9 @@ If instead it stops at a `NEEDS-CREATED` block, it needs the real creation time 
 before it can choose a track for them or score their freshness. Do Step 3b for **exactly** those
 addresses — not for every candidate — and run Step 3 again. Normally this is 1–6 lookups; the block
 warns you itself if it ever asks for more than 20, and that is a number to bring to the user rather
-than spend.
+than spend. That stop exits **3**, not 0 — a nonzero status there means "incomplete, do Step 3b", not
+a failure and not an empty market. Exit 0 means the list it printed is the answer; exit 1 means it
+could not read its own inputs.
 
 **Step 3b — real creation time, only for the rows Step 3 asked for.**
 
@@ -272,6 +274,12 @@ Formatting: ascii `$` with thousands separators; percentages to one decimal; age
 
 State these only when they bite the run in front of you.
 
+- **The growth axis compares corrected rates against uncorrected ones.** Holders and KOLs per day are
+  percentiles taken over every candidate on the chain, but only the rows that survived the gates get a
+  Step 3b lookup — looking up all of them would multiply the call count for rows already rejected. So a
+  listed migrated token is measured on its true rate while a rejected one beside it is still measured
+  on its inflated open-time rate, which makes the bar it clears slightly too high. The error runs
+  against the listed names, never in their favour, so it costs points rather than granting them.
 - **The 2-day track boundary is a cliff.** A token minutes either side of `YOUNG_D` is judged by a different gate set, and the drawdown ceiling in particular differs sharply. Until the ceiling becomes a continuous function of age, a name can pass or fail on eight minutes of age. The boundary is measured on the real creation age fetched in Step 3b, not on the pool-open age, so it is a cliff in the token's own history rather than in its migration time.
 - **`history_highest_market_cap` is unreliable on some chains.** Values above the plausibility guard are dropped to "unknown" rather than treated as worst-case; a token can therefore be listed with no ATH position at all.
 - **Some risk metrics are only computed on some chains, and absence looks exactly like zero.** The API returns the key on every chain; what differs is whether GMGN's analytics actually filled it. Measured on 569 unfiltered 24h rows across all seven chains — the share of rows carrying a non-zero value:
@@ -390,18 +398,26 @@ CHAINS=['sol','bsc','base','eth','robinhood','arc','stable']
 # no creation time for that row: that falls back to open time, which leaves the row on the stricter
 # new-launch track rather than promoting it on a number nobody could read.
 CRE={}
-try:
-    for _k,_v in json.load(open(f'{DATA}/created.json')).items():
-        try: _v=float(_v)
-        except (TypeError,ValueError): _v=None
-        # A creation time has to be a finite number inside the window a token could possibly exist in.
-        # NaN fails `_v==_v`; a string, a list, None, 0, a negative and any date before the first
-        # blockchain fail the rest. None of those is "very old" -- they are unreadable, and an
-        # unreadable value allowed through as very old would hand the row the easier mature track and,
-        # for NaN, a full freshness bonus on top: the exact failure this section exists to prevent.
-        # Unreadable is stored as None, which reads downstream as "asked, and there is no answer".
-        CRE[str(_k)]=(int(_v) if (_v==_v and 1230768000<_v<=now) else None)
-except Exception: pass
+try: _raw=json.load(open(f'{DATA}/created.json'))
+except Exception: _raw={}
+if not isinstance(_raw,dict): _raw={}
+for _k,_v in _raw.items():
+    # Every entry is judged on its own. One `try` wrapped around the whole loop looked tidier and was
+    # wrong twice over: a comparison against a non-number raises, so a single unreadable entry threw
+    # away every entry after it, and those rows came back in the next NEEDS-CREATED block. If the feed
+    # keeps answering the same unreadable value, that is not a wasted call -- it is a loop with no exit.
+    try: _v=float(_v)
+    except (TypeError,ValueError): _v=None
+    # A creation time has to be a finite number inside the window a token could possibly exist in.
+    # None and a non-numeric fail the first test; NaN fails `_v==_v`; 0, a negative, a date before the
+    # first blockchain and anything in the future fail the window. None of those is "very old" -- they
+    # are unreadable, and an unreadable value allowed through as very old would hand the row the easier
+    # mature track and, for NaN, a full freshness bonus on top: the exact failure this section exists to
+    # prevent. `float(True)` is 1.0, so a boolean lands outside the window like any other wrong type.
+    # Unreadable is stored as None, which reads downstream as "asked, and there is no answer" -- the key
+    # is still present, so the row is not asked for a second time.
+    _ok = _v is not None and _v==_v and 1230768000<_v<=now
+    CRE[str(_k)]=(int(_v) if _ok else None)
 def creage(ch,a,rage):
     ts=CRE.get(f'{ch}:{a}')
     # max(): a token cannot have been created after its own pool opened, so a feed that says otherwise
@@ -542,7 +558,6 @@ for c in UNI:
     # arrives here as 0 and is caught by the same test as an absent one.
     _ts=t.get('open_timestamp') or t.get('creation_timestamp')
     rage=(now-_ts)/86400 if _ts else MAX_AGE_D+1.0   # age in days; unknown never reads as 0
-    age=max(rage, 0.5)   # floor on the rate denominator: a 0.6h token must not blow up holders/day
     cage=creage(ch,a,rage)   # real age when Step 3b fetched it, else the open-time age
     ft=[]   # track-specific failures, kept apart until the track is settled (see `need_cre` below)
     turn=(v['24h']/t['market_cap']) if (v['24h'] and t['market_cap']) else None
@@ -623,16 +638,20 @@ for c in UNI:
     f[:]=list(dict.fromkeys(f))   # a field read twice must not be reported twice
     c['unverified']=unverified; c['no_bot_screen']=no_bot_screen; c['overhang']=overhang
     c['no_rug_screen']=no_rug_screen
-    c.update(rage=rage,cage=cage,h24=h24,h1h=h1h,botr=botr,fail=f,v=v,age=age,turn=turn,ath=_ap)
+    c.update(rage=rage,cage=cage,h24=h24,h1h=h1h,botr=botr,fail=f,v=v,turn=turn,ath=_ap)
     for x in f: rej[x]+=1; rej_ch[ch][x]+=1
     if not f: alive.append(c)
 
 # ---- pass 1 stops here when any surviving row's real age is still unknown ----
 # Printing a ranked list off open-time ages and then a corrected one invites the reader to trust the
 # first, so this run produces the addresses to look up and nothing else. Step 3b fetches them, Step 3
-# runs again, and that second run prints the list. The set can only shrink on the second pass: a
-# looked-up age is never younger than the open-time one, so it never promotes a row onto the easier
-# track and never raises a freshness score.
+# runs again, and that second run prints the list. A looked-up age is never younger than the open-time
+# one, so it never promotes a row onto the easier track, never raises a freshness score and never
+# raises a growth rate -- every correction lands on the row that was overstating itself. The one
+# knock-on effect is that the growth axis is a within-chain percentile, so lowering one row's rate
+# lifts its neighbours' percentiles slightly. That is the rule working, not drift: the corrected row
+# was the one inflating the bar. It cannot cause a third pass, because which rows get looked up is
+# decided by the gates and the track, never by a score.
 NEED=[c for c in UNI if c.get('need_cre')]
 if NEED:
     print(f"\nNEEDS-CREATED {len(NEED)} row(s): real creation time unknown and it can still change the outcome.")
@@ -641,7 +660,12 @@ if NEED:
     if len(NEED)>20:
         print(f"\n!! {len(NEED)} lookups is far above the 1-6 this normally costs. Do not fire them blind --")
         print("   say so in the report and ask the user before spending that many calls.")
-    raise SystemExit(0)
+    # Exit 3, not 0. "Stopped to ask for Step 3b" and "ran to completion" are different outcomes and
+    # a caller holding only a status has to tell them apart: 0 = the list printed above is the answer,
+    # 3 = the run is incomplete and the block above says exactly what to fetch, 1 = it could not read
+    # its own inputs. A 3 here is not a crash and not an empty market; rerunning Step 3 unchanged just
+    # prints the same block again.
+    raise SystemExit(3)
 
 AVAIL={}   # does this chain actually carry this field (all-zero/all-empty chain-wide = unsupported there)
 for ch in USE:
@@ -662,8 +686,15 @@ def vacc(c):
     return max(out) if out else None
 for c in UNI:
     t=c['t']; c['vacc']=vacc(c)
-    c['hgrow']=(t.get('holder_count') or 0)/c['age']       # holders per day
-    c['kgrow']=(t.get('renowned_count') or 0)/c['age']     # KOLs per day
+    # Real creation age, not the open-time one. holder_count and renowned_count are totals
+    # accumulated since the token existed, so dividing either by the time since its pool opened is a
+    # category error, and a large one: a token that sat 18 days on a bonding curve and migrated
+    # yesterday reported 10,836 holders/day and 22.0 KOLs/day against a true 993 and 2.0, on an axis
+    # carrying weight 0.15. cage falls back to the open-time age when Step 3b has no answer for the
+    # row, and it is clamped never to read younger than that, so a lookup can only lower a row's own
+    # growth rate -- it can never inflate one.
+    c['hgrow']=(t.get('holder_count') or 0)/max(c['cage'],0.5)     # holders per day since creation
+    c['kgrow']=(t.get('renowned_count') or 0)/max(c['cage'],0.5)   # KOLs per day since creation
 # percentiles over the whole cross-chain pool -> scores compare across chains; the cost is that
 # wallet-dense chains win the growth axes
 V0=3_000_000.0   # half-weight volume for significance shrinkage: ratio metrics are noise at small size, pull toward 1.0
