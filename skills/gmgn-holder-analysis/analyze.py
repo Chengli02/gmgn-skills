@@ -72,7 +72,21 @@ with ThreadPoolExecutor(max_workers=4) as ex:
         except Exception:
             NATIVE_PRICE = None
 
-normal = [h for h in holders if h.get('addr_type', 0) == 0]
+# ── 代币自身的合约地址不是持仓钱包 ──────────────────────────────────────
+# 上游把它当普通钱包返回（实测 musebook / robinhood：addr_type=0、0 买 0 卖、
+# 占总供应 15.01%、$5.06M，还带着 fresh_wallet 标签），于是它一个地址同时污染
+# biggest / top10 / top20 / airdrop / fresh / risk_all / top5，并单独把评级顶到
+# 🔴「最大单钱包持仓 16.30%，筹码极度集中」。剔掉它之后该币最大的真实普通钱包是
+# 4.10% 总供应，离 10% 闸门很远 —— 那个 16.30% 是把合约储备读成了大户。
+# 同批对照：JOLLY(robinhood) / SI(sol) / ARGUS(arc) 的持仓表里都没有自身地址，
+# 所以这不是某条链的固定约定，而是按币出现的上游分类缺陷。
+# 剔除不等于不判：合约自持的供应是可以被释放出来砸盘的，所以它在下方 §自持
+# 有独立的展示行和独立的告警闸门，见 self_pct。
+SELF_ADDR = TOKEN_ADDR.lower()
+selfheld  = [h for h in holders if (h.get('address') or '').lower() == SELF_ADDR]
+
+normal = [h for h in holders
+          if h.get('addr_type', 0) == 0 and (h.get('address') or '').lower() != SELF_ADDR]
 burn   = [h for h in holders if h.get('addr_type', 0) == 1]
 dex    = [h for h in holders if h.get('addr_type', 0) == 2]
 
@@ -125,6 +139,12 @@ dex_pct  = sum(h['amount_percentage'] for h in dex)
 # burn_pct / dex_pct 本身保持总供应基准 —— 它们定义了流通盘，再用流通盘做分母会循环。
 float_raw   = 1.0 - burn_pct - dex_pct
 float_share = max(float_raw, 1e-9)
+
+# 合约自持份额，按总供应基准 —— 和 burn_pct / dex_pct 同一口径。
+# 故意不从 float 分母里扣掉：销毁是永久消失、DEX 池就是市场本身，两者砸不动；
+# 合约自持只要一笔释放交易就能进入流通，性质不同。把它扣出分母会抬高报告里
+# 其余每一个钱包的占比，在所有带这一行的币上制造出新的误报。
+self_pct = sum(h.get('amount_percentage') or 0 for h in selfheld)
 
 # ── 流通盘退化保护 ──────────────────────────────────────────────────────
 # DEX 池（或销毁地址）吃掉几乎全部供应时 float_share 趋零，于是每个 `/ float_share`
@@ -321,7 +341,10 @@ kol_holding   = [h for h in kol   if (h.get('sell_tx_count_cur') or 0) == 0 and 
 smart_selling = [h for h in smart if (h.get('sell_tx_count_cur') or 0) > 0]
 smart_holding = [h for h in smart if (h.get('sell_tx_count_cur') or 0) == 0 and (h.get('balance') or 0) >= 1]
 
-top100_map   = {h['address']: h for h in holders}
+# 自身合约地址排除在外：dev 把筹码转回代币合约、或给合约打 gas，都不是"转给内部马甲"。
+# 同一个分类缺陷的另一个出口，一并关掉。
+top100_map   = {h['address']: h for h in holders
+                if (h.get('address') or '').lower() != SELF_ADDR}
 creator      = next((d for d in devs if 'creator' in (d.get('maker_token_tags') or [])), None)
 sub_devs     = [d for d in devs if 'creator' not in (d.get('maker_token_tags') or [])]
 dev_realized = sum(d.get('realized_profit') or 0 for d in devs)
@@ -484,6 +507,13 @@ else:
         if hold_pct_val > 0.01:
             warns.append(_( f"Dev 仍持仓 {pct(hold_pct_val):.2f}%",
                             f"Dev still holds {pct(hold_pct_val):.2f}%"))
+    if self_pct > 0.10:
+        # 合约自持走 warn 而不是 danger：这笔筹码要砸盘必须先有一笔链上释放交易，
+        # 是可观察的前置动作，和"一个大户随时可以卖"不是同一种风险；判成 danger
+        # 只是把同一个 🔴 换个名字再发一遍。也不设更高的 danger 档 —— 目前只有
+        # 一个实测样本，凭一个样本定第二道阈值就是猜。
+        warns.append(_( f"合约自持 {pct(self_pct):.1f}% 供应，释放后即为抛压",
+                        f"Contract self-holds {pct(self_pct):.1f}% of supply — sell pressure once released"))
     if airdrop_pct > 0.2:
         warns.append(_( f"空降筹码 {pct(airdrop_pct):.1f}%，来源不透明",
                         f"Airdrop supply {pct(airdrop_pct):.1f}% — opaque origin"))
@@ -625,6 +655,12 @@ print(f"  Top10 {fpct(top10, 1)} {c10f} · Top20 {fpct(top20, 1)} {c20f} · {_('
 airf  = pf("🔴" if airdrop_pct>0.25 else ("🟡" if airdrop_pct>0.1 else "🟢"))
 riskf = pf("🔴" if risk_pct>0.35 else ("🟡" if risk_pct>0.15 else "🟢"))
 print(f"  {_('转入筹码', 'Airdrop')} {len(airdrop)}{_('个', '')}({fpct(airdrop_pct)}) {airf} · {_('风险钱包', 'Risk')} {len(risk_all)}{_('个', '')}({fpct(risk_pct)}) {riskf}")
+
+if selfheld:
+    # 总供应基准，不经过 float_share，所以退化盘也照常打印真实数字
+    selff = "🔴" if self_pct > 0.30 else ("🟡" if self_pct > 0.10 else "🟢")
+    print(f"  {_('合约自持', 'Contract self-held')} {pct(self_pct):.2f}%"
+          f"{_('（总供应基准，已排除在钱包统计外）', ' (of supply, excluded from wallet stats)')} {selff}")
 
 any_risk = any(g for _lb, g, _fl in RISK_GROUPS)
 if any_risk:

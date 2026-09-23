@@ -54,6 +54,32 @@ amounts, USD values, and market caps still print — they do not pass through `f
 Percentages on a **total-supply** basis also still print (`burn`, `DEX`, float share itself, and
 the chip-quality buckets), because those denominators are unaffected.
 
+### The token's own contract address is not a holder wallet
+
+Upstream returns it as an ordinary wallet — measured on musebook (robinhood): `addr_type: 0`,
+0 buys, 0 sells, 15.01% of total supply, $5.06M, carrying a `fresh_wallet` tag. Left in the wallet
+cohort it pollutes `biggest`, Top10/Top20, airdrop, fresh, risk wallets and Top5 at once, and on its
+own trips the 🔴 danger gate as "largest wallet holds 16.30% — extreme concentration". The largest
+genuine wallet on that token is 4.10% of supply. Controls on the same batch — JOLLY (robinhood),
+SI (sol), ARGUS (arc) — carry no such row, so this is a per-token upstream classification gap, not a
+chain convention.
+
+So the script partitions it out of `normal` and reports it on its own line, **on a total-supply
+basis** (`合约自持 / Contract self-held`), with its own warn gate at >10% of supply. It is **not**
+removed from the judgement: contract-held supply reaches the market as soon as one release
+transaction lands, so it stays visible and still counts toward the rating. It is a warn rather than
+a danger because that release is an observable prior step, unlike a whale who can sell at will — and
+there is no higher danger tier, because only one sample has been measured and a second threshold off
+one sample would be a guess.
+
+It is deliberately **not** deducted from the float denominator. Burn is permanent and the DEX pool is
+the market itself, so neither can dump; self-held supply can. Removing it from the denominator would
+raise every other wallet's percentage on every token carrying this row, manufacturing new false
+positives while fixing one.
+
+The same address is also excluded from the dev sock-puppet map: chips sent back to the token contract,
+or gas paid to it, is not "transferred to an internal wallet".
+
 ### Holder object key fields
 
 | Field | Type | Meaning |
@@ -110,7 +136,7 @@ Entry timing pressure (批次浮盈/出货) does **NOT** affect the overall rati
 |-------------|-------------|-------|-----------|
 | 无法评估 | Cannot Assess | ⚪ | Tradeable float <2% of supply, **or** upstream returned zero holders (all percentage rules suppressed; dev sock puppet still escalates to 🔴) |
 | 不建议买 | Not Recommended | 🔴 | Any: rat traders >5% / largest wallet >10% / dev sock puppet |
-| 谨慎参与 | Caution | ⚠️ | ≥2 of: Dev still holding >1% / airdrop >20% / risk wallets >35% / linked >15% |
+| 谨慎参与 | Caution | ⚠️ | ≥2 of: Dev still holding >1% / airdrop >20% / risk wallets >35% / linked >15% / contract self-holds >10% of supply |
 | 可轻仓   | Light Position | 🟡 | Exactly 1 of above warns |
 | 正常参与 | Normal | ✅ | None of the above |
 
